@@ -54,8 +54,8 @@ from matplotlib.patches import Rectangle
 
 # Carpeta principal del proyecto: todas las demás rutas salen de esta.
 CARPETA_BASE = r"C:\Users\manue\Downloads\3ccbe"
-CARPETA_ENTRADA = os.path.join(CARPETA_BASE, "salidas", "importancias")
-CARPETA_SALIDA = os.path.join(CARPETA_BASE, "salidas", "plantilla")
+CARPETA_ENTRADA = os.path.join(CARPETA_BASE, "salidas_corregidas", "importancias")
+CARPETA_SALIDA = os.path.join(CARPETA_BASE, "salidas_corregidas", "plantilla")
 
 # Ejecución del CÓDIGO 3 que se va a leer. Si se deja vacío, el código toma
 # sola la más reciente. Para fijar una se escribe el dataset y el método,
