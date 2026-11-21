@@ -39,8 +39,9 @@
 #      recall macro y F1 macro, en train y en test. El AUC es el que ya
 #      calculaba el código original. El resultado que se reporta es el de la
 #      última época.
-#  10. Se guardan en salidas/espectrogramas las medidas por época (con la
-#      pérdida) y las predicciones de la última época, para 10_graficos.py.
+#  10. Se guardan en salidas_corregidas/espectrogramas las medidas por época (con
+#      la pérdida, el tiempo y el dispositivo) y las predicciones de la última
+#      época, para 10_graficos.py. El checkpoint de la mejor época también va ahí.
 #
 # Con el split 70/30 y semilla 42 da 13,04 % de accuracy en test (resultado
 # del congreso).
@@ -51,6 +52,7 @@ import logging
 import random
 import gc
 import time
+import platform
 import cv2
 import math
 import warnings
@@ -131,7 +133,7 @@ class CFG:
     print_freq = 100
     num_workers = 0  # CAMBIADO (Windows): original = 2
 
-    OUTPUT_DIR = r"C:\Users\manue\Downloads\3ccbe\3ccbe\base3_DL\avanzada_LINK_final"  # CAMBIADO
+    OUTPUT_DIR = r"C:\Users\manue\Downloads\3ccbe\salidas_corregidas\espectrogramas"  # CAMBIADO: antes iba a 3ccbe\base3_DL\avanzada_LINK_final (ahí quedó el checkpoint viejo, que no se sobrescribe)
 
     train_datadir = r"C:\Users\manue\Downloads\3ccbe\train_audio"  # CAMBIADO
     train_csv = RUTA_SPLIT  # CAMBIADO: lista de audios y especies del split de 03_metricas.py
@@ -619,8 +621,16 @@ def run_training(df, cfg):
         best_epoch = 0
         filas_epocas = []
 
+        # CAMBIO: el dispositivo y el tiempo de cada época se guardan en el registro por época.
+        if torch.cuda.is_available():
+            nombre_dispositivo = f"GPU ({torch.cuda.get_device_name(0)})"
+        else:
+            nombre_dispositivo = f"CPU ({platform.processor()})"
+        print(f"Dispositivo: {nombre_dispositivo}")
+
         for epoch in range(cfg.epochs):
             print(f"\nEpoch {epoch+1}/{cfg.epochs}")
+            tiempo_inicio_epoca = time.perf_counter()
 
             train_loss, train_auc, m_tr = train_one_epoch(
                 model, train_loader, optimizer, criterion, cfg.device,
@@ -636,9 +646,11 @@ def run_training(df, cfg):
                     scheduler.step()
 
             # CAMBIO: se muestran y se guardan AUC, accuracy, recall macro y F1 macro.
+            tiempo_epoca = time.perf_counter() - tiempo_inicio_epoca
             print(f"  TRAIN | {fmt(train_auc, m_tr)}", flush=True)
             print(f"  TEST  | {fmt(val_auc, m_te)}", flush=True)
-            filas_epocas.append({"epoca": epoch + 1, "train_loss": train_loss, "train_auc": train_auc, **{f"train_{k}": v for k, v in m_tr.items()}, "test_loss": val_loss, "test_auc": val_auc, **{f"test_{k}": v for k, v in m_te.items()}})
+            print(f"  Tiempo de la época: {tiempo_epoca:.1f} s", flush=True)
+            filas_epocas.append({"epoca": epoch + 1, "train_loss": train_loss, "train_auc": train_auc, **{f"train_{k}": v for k, v in m_tr.items()}, "test_loss": val_loss, "test_auc": val_auc, **{f"test_{k}": v for k, v in m_te.items()}, "tiempo_s": tiempo_epoca, "dispositivo": nombre_dispositivo})
 
             if val_auc > best_auc:
                 best_auc = val_auc
@@ -663,11 +675,12 @@ def run_training(df, cfg):
     print(f"Mejor AUC (test, mejor epoca): {best_scores[0]:.4f}")
     print("RESULTADO FINAL (ultima epoca, sin seleccionar):", fmt(val_auc, m_te), flush=True)
     # CAMBIO: los resultados por época y las predicciones de la última época se
-    # guardan en salidas/espectrogramas, para 10_graficos.py.
+    # guardan en salidas_corregidas/espectrogramas, para 10_graficos.py.
     #   - Épocas. Columnas: 0 época, 1 a 5 train (pérdida, AUC, accuracy, recall,
-    #     F1) y 6 a 10 prueba en el mismo orden.
+    #     F1), 6 a 10 prueba en el mismo orden, 11 el tiempo de la época en
+    #     segundos y 12 el dispositivo.
     #   - Predicciones. Columnas: 0 archivo, 1 especie real, 2 especie predicha.
-    carpeta_resultados = os.path.join(colores.CARPETA_BASE, "salidas", "espectrogramas")
+    carpeta_resultados = os.path.join(colores.CARPETA_BASE, "salidas_corregidas", "espectrogramas")
     os.makedirs(carpeta_resultados, exist_ok=True)
     nombre_resultados = os.path.splitext(os.path.basename(RUTA_SPLIT))[0].replace("Split_", "Espectrogramas_", 1)
     ruta_epocas = os.path.join(carpeta_resultados, f"{nombre_resultados}_epocas.csv")
