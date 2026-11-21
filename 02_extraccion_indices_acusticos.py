@@ -1,5 +1,5 @@
 # ==============================================================================
-# CÓDIGO 2 — EXTRACCIÓN DE ÍNDICES ACÚSTICOS + NORMALIZACIÓN
+# CÓDIGO 2 — EXTRACCIÓN DE ÍNDICES ACÚSTICOS (VALORES CRUDOS)
 # ==============================================================================
 # Este código es la extracción de índices ecoacústicos con scikit-maad. Recibe
 # el CSV que entregó el filtrado (CÓDIGO 1), abre cada audio y le calcula los
@@ -13,10 +13,8 @@
 #   4. Conserva archivo, especie, label y clase.
 #   5. Calcula 16 índices temporales + 44 índices espectrales = 60 índices
 #      escalares. Se excluye LEQt, así que quedan 59 en el dataset final.
-#   6. No guarda un archivo bruto; los valores brutos solo permanecen en memoria
-#      y se documentan en el reporte.
-#   7. Normaliza todos los índices con MinMaxScaler al rango [0,1].
-#   8. Guarda un único CSV final normalizado y un reporte TXT.
+#   6. Guarda un único CSV final con los valores CRUDOS (sin normalizar) y un
+#      reporte TXT.
 #
 # IMPORTANTE:
 # - El código usa librosa para cargar los audios porque BirdCLEF contiene
@@ -24,9 +22,12 @@
 # - Los índices se calculan con scikit-maad.
 # - El label ya debe venir del CÓDIGO 1 y se conserva sin volverlo a crear.
 # - Los audios se cargan con su frecuencia de muestreo original.
-# - Las especies que no llegan al mínimo se quitan ANTES de extraer: así la
-#   normalización se hace una sola vez y solo con los audios con los que se
-#   trabaja.
+# - Este código YA NO normaliza. El CSV que guarda contiene los valores crudos
+#   de cada índice. La normalización MinMax se hace en el CÓDIGO 3
+#   (03_metricas.py), después del split y ajustada SOLO con los audios de
+#   entrenamiento, para que los audios de prueba no participen en ella.
+# - Las especies que no llegan al mínimo se quitan ANTES de extraer: así solo se
+#   trabaja con los audios que se van a usar.
 # - El archivo del filtrado se lee solo y sus columnas se leen por POSICIÓN,
 #   nunca por nombre.
 # - La lista de índices no está escrita a mano: se toma de lo que devuelve
@@ -57,7 +58,6 @@ import warnings
 import numpy as np
 import pandas as pd
 import librosa
-from sklearn.preprocessing import MinMaxScaler
 
 try:
     import maad
@@ -74,7 +74,7 @@ except ImportError as error_importacion:
 CARPETA_BASE = r"C:\Users\manue\Downloads\3ccbe"
 CARPETA_AUDIOS = os.path.join(CARPETA_BASE, "train_audio")
 CARPETA_ENTRADA = os.path.join(CARPETA_BASE, "salidas", "filtrado")
-CARPETA_SALIDA = os.path.join(CARPETA_BASE, "salidas", "indices")
+CARPETA_SALIDA = os.path.join(CARPETA_BASE, "salidas_corregidas", "indices")
 
 # Archivo del filtrado que se va a leer. Si se deja vacío, el código toma solo
 # el archivo más reciente que entregó el filtrado.
@@ -110,9 +110,6 @@ DETREND = True                  # se le resta al audio su promedio antes de calc
 
 # Índices que se calculan y se auditan, pero no entran al dataset final.
 INDICES_EXCLUIDOS = ["LEQt"]
-
-# Tolerancia para los errores de precisión de la normalización.
-TOL_NORMALIZACION = 1e-9
 
 # Cada cuántos audios se muestra el avance en pantalla.
 MOSTRAR_CADA = 100
@@ -210,7 +207,7 @@ if not os.path.exists(RUTA_CSV):
     raise SystemExit(f"No se encontró el archivo de entrada: {RUTA_CSV}")
 nombre_archivo = os.path.splitext(os.path.basename(RUTA_CSV))[0]
 NOMBRE_DATASET = nombre_archivo.replace("Filtrado_", "", 1)
-SALIDA_NORMALIZADO = os.path.join(CARPETA_SALIDA, f"Indices_{NOMBRE_DATASET}.csv")
+SALIDA_CRUDO = os.path.join(CARPETA_SALIDA, f"Indices_{NOMBRE_DATASET}.csv")
 SALIDA_REPORTE = os.path.join(CARPETA_SALIDA, f"Reporte_Indices_{NOMBRE_DATASET}.txt")
 os.makedirs(CARPETA_SALIDA, exist_ok=True)
 df = pd.read_csv(RUTA_CSV)
@@ -260,9 +257,8 @@ anotar("Relación especie-label : correcta")
 # ==============================================================================
 # BLOQUE 2.1 — MÍNIMO DE AUDIOS POR ESPECIE
 # Se cuentan los audios de cada especie y se dejan solo las especies que llegan
-# al mínimo elegido. Se hace ANTES de extraer: así la normalización se calcula
-# una sola vez y solo con los audios con los que se trabaja. El orden de las
-# filas del filtrado no cambia.
+# al mínimo elegido. Se hace ANTES de extraer: así solo se extraen los audios con
+# los que se trabaja. El orden de las filas del filtrado no cambia.
 # ==============================================================================
 audios_por_especie = especie.value_counts()
 especies_conservadas = set(audios_por_especie[audios_por_especie >= minimo].index)
@@ -369,74 +365,37 @@ if len(indices_con_invalidos) > 0:
     raise SystemExit(f"Hay índices con valores NaN/inf. Revise el reporte: {SALIDA_REPORTE}")
 
 # ==============================================================================
-# BLOQUE 5 — NORMALIZACIÓN MIN-MAX
-# MinMaxScaler lleva cada índice al rango [0,1]. Por aritmética de punto
-# flotante pueden aparecer desviaciones microscópicas como 1.0000000000000002 o
-# -2e-16. Se aceptan únicamente dentro de una tolerancia numérica estricta y
-# luego se recortan exactamente a [0,1].
+# BLOQUE 5 — GUARDADO DEL ÚNICO CSV FINAL CON VALORES CRUDOS
+# Aquí ya no se normaliza: la normalización MinMax se hace en el CÓDIGO 3, con
+# los audios de entrenamiento. Se verifica que el número de registros coincida
+# con la tabla meta (los NaN e infinitos ya se revisaron en el BLOQUE 4) y se
+# unen las 4 columnas meta con los índices crudos. Este es el único archivo de
+# índices que se guarda en disco.
 # ==============================================================================
-scaler = MinMaxScaler()
-valores_normalizados = scaler.fit_transform(df_bruto)
-min_antes_clip = float(np.nanmin(valores_normalizados))
-max_antes_clip = float(np.nanmax(valores_normalizados))
-nan_final = int(np.isnan(valores_normalizados).sum())
-inf_final = int(np.isinf(valores_normalizados).sum())
-fuera_tolerancia = int(((valores_normalizados < -TOL_NORMALIZACION) | (valores_normalizados > 1 + TOL_NORMALIZACION)).sum())
-ajustes_precision = int(((valores_normalizados < 0) | (valores_normalizados > 1)).sum())
-valores_normalizados = np.clip(valores_normalizados, 0.0, 1.0)
-df_norm = pd.DataFrame(valores_normalizados, columns=df_bruto.columns)
+if len(df_bruto) != len(df_meta):
+    raise SystemExit("El número de registros de los índices no coincide con el de la tabla meta.")
+df_final = pd.concat([df_meta, df_bruto], axis=1)
+df_final.to_csv(SALIDA_CRUDO, index=False)
 
 # ==============================================================================
-# BLOQUE 6 — VALIDACIÓN DE LA NORMALIZACIÓN
-# Solo se recortan desviaciones numéricas microscópicas dentro de la tolerancia.
-# Valores no finitos o realmente fuera del rango detienen el proceso.
-# ==============================================================================
-fuera_rango = int(((valores_normalizados < 0) | (valores_normalizados > 1)).sum())
-if nan_final != 0 or inf_final != 0:
-    raise SystemExit(f"La normalización produjo valores no finitos. NaN={nan_final}, Inf={inf_final}.")
-if fuera_tolerancia != 0:
-    raise SystemExit(f"La normalización produjo {fuera_tolerancia} valores realmente fuera de [0,1]. Min={min_antes_clip}, Max={max_antes_clip}.")
-if fuera_rango != 0:
-    raise SystemExit("La validación final [0,1] falló después del ajuste de precisión.")
-if len(df_norm) != len(df_meta):
-    raise SystemExit("El número de registros cambió durante la normalización.")
-
-# ==============================================================================
-# BLOQUE 7 — GUARDADO DEL ÚNICO CSV FINAL NORMALIZADO
-# Se unen las 4 columnas meta con los índices normalizados. Este es el único
-# archivo de índices que se guarda en disco.
-# ==============================================================================
-df_final = pd.concat([df_meta, df_norm], axis=1)
-df_final.to_csv(SALIDA_NORMALIZADO, index=False)
-
-# ==============================================================================
-# BLOQUE 8 — REPORTE
-# Se documentan la normalización, el dataset final y los audios con error. La
-# lista de índices y sus estadísticas brutas y normalizadas se escriben solo en
-# el archivo del reporte, porque son muchas líneas para la pantalla.
+# BLOQUE 6 — REPORTE
+# Se documentan el dataset final y los audios con error. La lista de índices y
+# sus estadísticas crudas se escriben solo en el archivo del reporte, porque son
+# muchas líneas para la pantalla.
 # En el CSV final la especie está en la posición 1 y el label en la 2.
 # ==============================================================================
 estadisticas_brutas = df_bruto.agg(["min", "max", "mean", "std"]).T
-estadisticas_normalizadas = df_norm.agg(["min", "max", "mean", "std"]).T
 anotar("")
-anotar("5. NORMALIZACIÓN")
-anotar("Método                 : MinMaxScaler")
-anotar("Rango objetivo         : [0,1]")
-anotar(f"Tolerancia numérica    : {TOL_NORMALIZACION}")
-anotar(f"Min antes de clip      : {min_antes_clip:.18f}")
-anotar(f"Max antes de clip      : {max_antes_clip:.18f}")
-anotar(f"Ajustes de precisión   : {ajustes_precision}")
-anotar(f"Fuera de tolerancia    : {fuera_tolerancia}")
-anotar(f"NaN finales            : {nan_final}")
-anotar(f"Infinitos finales      : {inf_final}")
-anotar(f"Fuera de rango final   : {fuera_rango}")
+anotar("5. VALORES CRUDOS")
+anotar("Normalización          : NO SE HACE AQUÍ; se hace en el CÓDIGO 3 (03_metricas.py), ajustada solo con train")
+anotar("NaN e infinitos        : ninguno (se verificó en el BLOQUE 4)")
 anotar("")
 anotar("6. DATASET FINAL")
 anotar(f"Registros              : {len(df_final):,}")
 anotar(f"Especies               : {df_final.iloc[:, 1].nunique():,}")
 anotar(f"Labels                 : {df_final.iloc[:, 2].nunique():,}")
 anotar(f"Columnas meta          : {N_COLUMNAS_META}")
-anotar(f"Índices finales        : {df_norm.shape[1]}")
+anotar(f"Índices finales        : {df_bruto.shape[1]}")
 anotar(f"Columnas totales       : {df_final.shape[1]}")
 anotar("Orden                  : archivo | especie | label | clase | índices...")
 anotar("")
@@ -447,8 +406,7 @@ for archivo_error, texto_error in errores:
     anotar(f"{archivo_error} | {texto_error}")
 anotar("")
 anotar("8. ARCHIVOS GENERADOS")
-anotar("Archivo bruto          : NO SE GUARDA; solo se usa temporalmente en memoria y en el reporte.")
-anotar(f"CSV normalizado        : {SALIDA_NORMALIZADO}")
+anotar(f"CSV con valores crudos: {SALIDA_CRUDO}")
 anotar(f"Reporte                : {SALIDA_REPORTE}")
 reporte.append("")
 reporte.append("9. ÍNDICES TEMPORALES")
@@ -463,12 +421,8 @@ for indice in espectrales_conservados:
     reporte.append(f"[{numero_indice}] {indice}")
     numero_indice += 1
 reporte.append("")
-reporte.append("11. ESTADÍSTICAS BRUTAS")
+reporte.append("11. ESTADÍSTICAS CRUDAS")
 for indice, fila_est in estadisticas_brutas.iterrows():
-    reporte.append(f"{indice:<22} min={fila_est.iloc[0]:.10f} max={fila_est.iloc[1]:.10f} media={fila_est.iloc[2]:.10f} std={fila_est.iloc[3]:.10f}")
-reporte.append("")
-reporte.append("12. ESTADÍSTICAS NORMALIZADAS")
-for indice, fila_est in estadisticas_normalizadas.iterrows():
     reporte.append(f"{indice:<22} min={fila_est.iloc[0]:.10f} max={fila_est.iloc[1]:.10f} media={fila_est.iloc[2]:.10f} std={fila_est.iloc[3]:.10f}")
 with open(SALIDA_REPORTE, "w", encoding="utf-8") as archivo_reporte:
     archivo_reporte.write("\n".join(reporte))
