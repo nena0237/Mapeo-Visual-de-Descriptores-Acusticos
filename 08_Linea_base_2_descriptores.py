@@ -14,13 +14,17 @@
 #     Aquí solo se piden las imágenes ya pintadas y sus etiquetas.
 #   - Las rutas del proyecto se toman del código de colores.
 #
-# EL MODELO (es el mismo del estudio, no se cambia):
+# EL MODELO:
 #   - EfficientNet-B0 ya entrenada con ImageNet (transfer learning).
 #   - La primera convolución se cambia de 3 canales (color) a 1 canal (grises),
 #     porque las imágenes de la plantilla son en escala de grises. Sus pesos
 #     iniciales son el promedio de los 3 canales originales.
-#   - Toda la red queda congelada. Solo se entrenan la primera convolución y el
-#     clasificador nuevo (Dropout + una capa con una salida por especie).
+#   - Toda la red es entrenable (fine-tuning completo): se ajusta entera
+#     partiendo de los pesos de ImageNet, junto con el clasificador nuevo
+#     (Dropout + una capa con una salida por especie). Ya no hay capas
+#     congeladas. Así modelo.train() también actualiza las estadísticas de
+#     BatchNorm de toda la red, de forma coherente con una red totalmente
+#     entrenable.
 #   - Función de pérdida: CrossEntropyLoss. Optimizador: Adam.
 #
 # LO QUE SE MIDE EN CADA ÉPOCA:
@@ -35,7 +39,8 @@
 #     demás y se promedian.
 #   - Estas medidas solo se calculan: no cambian el entrenamiento. La red
 #     aprende solo con la pérdida (CrossEntropyLoss).
-#   - Al final se muestra la MEJOR ÉPOCA, que es la de mayor AUC en prueba.
+#   - El resultado que se reporta es el de la ÚLTIMA época. La mejor época (la
+#     de mayor AUC en prueba) se anota solo como información.
 #
 # IMPORTANTE:
 # - La semilla se fija de nuevo antes de cada tabla. Así el resultado de cada
@@ -44,12 +49,16 @@
 #   semilla 1024, y aquí la semilla, las épocas y los demás valores del BLOQUE 0
 #   se dejan como están.
 # - No se pregunta nada por teclado y todo se lee por POSICIÓN de columna.
-# - Lo único que se guarda es un reporte de texto por tabla.
+# - Por cada tabla se guarda un reporte de texto (con el dispositivo y el número
+#   de parámetros), el registro por época (con el tiempo de cada época) y las
+#   predicciones de la última época, en salidas_corregidas/main.
 # ==============================================================================
 
 import os
 import glob
+import time
 import random
+import platform
 import importlib
 import numpy as np
 import pandas as pd
@@ -106,10 +115,15 @@ cargador_datos = importlib.import_module(ARCHIVO_DATALOADER)
 PlantillaDataset = cargador_datos.PlantillaDataset
 CARPETA_PLANTILLA = cargador_datos.colores.CARPETA_PLANTILLA
 CARPETA_SPLIT = cargador_datos.colores.CARPETA_TABLAS
-CARPETA_SALIDA = os.path.join(cargador_datos.colores.CARPETA_BASE, "salidas", "main")
+CARPETA_SALIDA = os.path.join(cargador_datos.colores.CARPETA_BASE, "salidas_corregidas", "main")
 
 # El entrenamiento se hace en la tarjeta gráfica si hay una; si no, en el procesador.
+# NOMBRE_DISPOSITIVO es el texto que se anota en el reporte (GPU con su nombre o CPU).
 DISPOSITIVO = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+if torch.cuda.is_available():
+    NOMBRE_DISPOSITIVO = f"GPU ({torch.cuda.get_device_name(0)})"
+else:
+    NOMBRE_DISPOSITIVO = f"CPU ({platform.processor()})"
 
 # Lista donde se guarda cada línea del reporte de la tabla que se está entrenando.
 reporte = []
@@ -157,9 +171,8 @@ def buscar_split(nombre_plantilla):
     return max(archivos_dataset, key=os.path.getmtime)
 
 
-# Crea la red EfficientNet-B0 del estudio para un número de especies.
-# El orden de los pasos no se cambia, porque de él depende que el resultado se
-# pueda repetir con la misma semilla.
+# Crea la red EfficientNet-B0 para un número de especies. Toda la red queda
+# entrenable (fine-tuning completo), partiendo de los pesos de ImageNet.
 def crear_modelo(numero_clases):
     # Red ya entrenada con ImageNet.
     modelo = models.efficientnet_b0(weights=models.EfficientNet_B0_Weights.DEFAULT)
@@ -168,12 +181,9 @@ def crear_modelo(numero_clases):
     modelo.features[0][0] = nn.Conv2d(in_channels=1, out_channels=conv_original.out_channels, kernel_size=conv_original.kernel_size, stride=conv_original.stride, padding=conv_original.padding, bias=False)
     with torch.no_grad():
         modelo.features[0][0].weight[:] = conv_original.weight.mean(dim=1, keepdim=True)
-    # Se congela toda la red y se deja entrenable solo la primera convolución.
-    for parametro in modelo.parameters():
-        parametro.requires_grad = False
-    for parametro in modelo.features[0][0].parameters():
-        parametro.requires_grad = True
-    # Clasificador nuevo, con una salida por especie. Como es nuevo, es entrenable.
+    # No se congela nada: todos los parámetros de la red quedan entrenables
+    # (requires_grad = True, que es el valor por defecto de PyTorch).
+    # Clasificador nuevo, con una salida por especie. También es entrenable.
     entradas_clasificador = modelo.classifier[1].in_features
     modelo.classifier = nn.Sequential(nn.Dropout(DROPOUT), nn.Linear(entradas_clasificador, numero_clases))
     return modelo.to(DISPOSITIVO)
@@ -273,7 +283,7 @@ for tipo_tabla in TABLAS:
 if len(tablas_con_plantilla) == 0:
     raise SystemExit("No hay ninguna plantilla. Ejecute primero 04_plantilla.py.")
 os.makedirs(CARPETA_SALIDA, exist_ok=True)
-print(f"Dispositivo: {DISPOSITIVO}")
+print(f"Dispositivo: {NOMBRE_DISPOSITIVO}")
 
 # ==============================================================================
 # BLOQUE 3 — ENTRENAMIENTO Y EVALUACIÓN DE CADA TABLA
@@ -317,16 +327,21 @@ for tipo_tabla in tablas_con_plantilla:
     anotar(f"Split     : {os.path.basename(ruta_split)}")
     anotar(f"Train: {len(posiciones_train)}  Val: {len(posiciones_test)}")
     anotar(f"Semilla: {SEMILLA} | Épocas: {NUM_EPOCAS} | Lote: {TAMANO_LOTE} | Tasa de aprendizaje: {TASA_APRENDIZAJE} | Dropout: {DROPOUT}")
-    anotar("")
+    anotar(f"Dispositivo: {NOMBRE_DISPOSITIVO}")
 
     # --------------------------------------------------------------------------
     # 3.3 MODELO
-    # Solo se le entregan al optimizador los pesos que quedaron entrenables.
+    # Toda la red es entrenable (fine-tuning completo): al optimizador se le
+    # entregan todos los pesos que tienen requires_grad. Se anota cuántos son.
     # --------------------------------------------------------------------------
     modelo = crear_modelo(dataset.n_classes)
     criterio = nn.CrossEntropyLoss()
     pesos_entrenables = [parametro for parametro in modelo.parameters() if parametro.requires_grad]
     optimizador = optim.Adam(pesos_entrenables, lr=TASA_APRENDIZAJE)
+    parametros_entrenables = sum(parametro.numel() for parametro in pesos_entrenables)
+    parametros_totales = sum(parametro.numel() for parametro in modelo.parameters())
+    anotar(f"Parámetros entrenables: {parametros_entrenables:,} de {parametros_totales:,} en total")
+    anotar("")
 
     # --------------------------------------------------------------------------
     # 3.4 ENTRENAMIENTO Y EVALUACIÓN POR ÉPOCA
@@ -336,19 +351,24 @@ for tipo_tabla in tablas_con_plantilla:
     # van en el orden de resumir_epoca: 0 pérdida, 1 accuracy, 2 recall, 3 F1, 4 AUC.
     historial = []
     filas_epocas = []
+    tiempo_inicio_tabla = time.perf_counter()
     for epoca in range(1, NUM_EPOCAS + 1):
+        tiempo_inicio_epoca = time.perf_counter()
         medidas_train = entrenar_epoca(modelo, cargador_train, criterio, optimizador)
         medidas_val, predichas_val = evaluar(modelo, cargador_test, criterio)
+        tiempo_epoca = time.perf_counter() - tiempo_inicio_epoca
         historial.append((epoca, medidas_val))
-        filas_epocas.append([epoca] + list(medidas_train) + list(medidas_val))
-        anotar(f"Epoch {epoca}/{NUM_EPOCAS}")
+        filas_epocas.append([epoca] + list(medidas_train) + list(medidas_val) + [tiempo_epoca])
+        anotar(f"Epoch {epoca}/{NUM_EPOCAS} (tiempo: {tiempo_epoca:.1f} s)")
         anotar(texto_medidas("Train", medidas_train))
         anotar(texto_medidas("Val", medidas_val))
+    tiempo_total_tabla = time.perf_counter() - tiempo_inicio_tabla
 
     # --------------------------------------------------------------------------
-    # 3.5 MEJOR ÉPOCA Y REPORTE
-    # La mejor época es la de mayor AUC en prueba. Si dos épocas empatan, queda
-    # la primera. También se muestra la última época, para comparar.
+    # 3.5 ÚLTIMA ÉPOCA, MEJOR ÉPOCA Y REPORTE
+    # El resultado que se reporta es el de la última época. La mejor época es la
+    # de mayor AUC en prueba (si dos épocas empatan, queda la primera) y se anota
+    # solo como información. También se anota el tiempo total de la tabla.
     # --------------------------------------------------------------------------
     mejor = historial[0]
     for fila in historial:
@@ -357,10 +377,11 @@ for tipo_tabla in tablas_con_plantilla:
     ultima = historial[-1]
     anotar("")
     anotar("=" * 60)
-    anotar(f"MEJOR EPOCA (por Val AUC): {mejor[0]}")
-    anotar(texto_medidas("Val", mejor[1]))
-    anotar(f"ULTIMA EPOCA: {ultima[0]}")
+    anotar(f"RESULTADO (ULTIMA EPOCA): {ultima[0]}")
     anotar(texto_medidas("Val", ultima[1]))
+    anotar(f"MEJOR EPOCA (por Val AUC, solo informativa): {mejor[0]}")
+    anotar(texto_medidas("Val", mejor[1]))
+    anotar(f"Tiempo total de entrenamiento: {tiempo_total_tabla:.1f} s en {NOMBRE_DISPOSITIVO}")
     with open(RUTA_REPORTE, "w", encoding="utf-8") as archivo_reporte:
         archivo_reporte.write("\n".join(reporte))
     print(f"Reporte guardado en: {RUTA_REPORTE}")
@@ -369,11 +390,12 @@ for tipo_tabla in tablas_con_plantilla:
     # 3.6 RESULTADOS POR ÉPOCA Y PREDICCIONES (para 10_graficos.py)
     # Se guardan dos CSV junto al reporte:
     #   - Las medidas de cada época. Columnas: 0 época, 1 a 5 train (pérdida,
-    #     accuracy, recall, F1, AUC) y 6 a 10 prueba en el mismo orden.
+    #     accuracy, recall, F1, AUC), 6 a 10 prueba en el mismo orden y 11 el
+    #     tiempo de la época en segundos.
     #   - Las predicciones de la última época en los audios de prueba.
     #     Columnas: 0 archivo, 1 especie real, 2 especie predicha.
     # --------------------------------------------------------------------------
-    columnas_epocas = ["epoca", "train_loss", "train_acc", "train_recall", "train_f1", "train_auc", "test_loss", "test_acc", "test_recall", "test_f1", "test_auc"]
+    columnas_epocas = ["epoca", "train_loss", "train_acc", "train_recall", "train_f1", "train_auc", "test_loss", "test_acc", "test_recall", "test_f1", "test_auc", "tiempo_s"]
     RUTA_EPOCAS = RUTA_REPORTE.replace(".txt", "_epocas.csv")
     pd.DataFrame(filas_epocas, columns=columnas_epocas).to_csv(RUTA_EPOCAS, index=False)
     especies_reales = dataset.classes[dataset.etiquetas.numpy()[posiciones_test]]
