@@ -8,8 +8,8 @@
 # los índices). Aquí se hace lo mismo para cada tabla, una después de la otra.
 #
 # Este código NO repite nada de los códigos anteriores:
-#   - Las tablas con las características seleccionadas y el split los entregó
-#     03_metricas.py. Aquí solo se leen.
+#   - Las tablas (con las características seleccionadas por ReliefF o sin
+#     selección) y el split los entregó 03_metricas.py. Aquí solo se leen.
 #   - Las rutas del proyecto y las posiciones de la tabla se toman del código
 #     de colores.
 #
@@ -37,13 +37,19 @@
 #   misma versión de scikit-learn el resultado siempre es el mismo. Con otra
 #   versión pueden cambiar unos decimales en algunos clasificadores (LDA y
 #   Gradient Boosting).
-# - No se pregunta nada por teclado y todo se lee por POSICIÓN de columna.
+# - Por teclado solo se pregunta con qué tabla se entrena: con ReliefF (las
+#   características seleccionadas), sin ReliefF (todos los descriptores) u otra.
+#   Todo lo demás se lee por POSICIÓN de columna.
+# - Los valores de las tablas están normalizados con MinMax ajustado solo con
+#   entrenamiento, así que en prueba pueden salir de [0,1]. No se recortan.
 # - Por cada tabla se guardan dos CSV: la tabla de resultados y las
 #   predicciones de cada clasificador en los audios de prueba (para la matriz
-#   de confusión de 10_graficos.py).
+#   de confusión de 10_graficos.py). Los nombres llevan "conReliefF" o
+#   "sinReliefF" según la tabla elegida y se guardan en salidas_corregidas/clasicos.
 # ==============================================================================
 
 import os
+import re
 import glob
 import importlib
 import numpy as np
@@ -75,10 +81,10 @@ ARCHIVO_COLORES = "05_colores"
 # Tablas con las que se entrena. Se entrena con cada una que exista.
 TABLAS = ["Caracteristicas", "Indices"]
 
-# Ejecución de 03_metricas.py que se va a usar. Si se deja vacío, se toma sola
-# la más reciente. Para fijar una se escribe el dataset y el método,
-# ejemplo: "Aves_0-5s_XC_ReliefF"
-NOMBRE_EJECUCION = ""
+# Opciones del menú de la tabla con la que se entrena. Cada una tiene: el texto
+# del menú, el final del nombre de la tabla de 03_metricas.py
+# (<tabla>_<dataset>_<final>.csv) y la marca que llevan los archivos de salida.
+TABLAS_MENU = [("Con ReliefF (seleccionada)", "ReliefF", "conReliefF"), ("Sin ReliefF (todos los descriptores)", "SinSeleccion", "sinReliefF")]
 
 # Split que se va a usar. Si se deja vacío, se toma solo el más reciente del
 # mismo dataset. Para fijar uno se escribe la división y la semilla,
@@ -100,7 +106,7 @@ POS_SPLIT_SET = 3       # conjunto del audio: "train" o "test"
 # ==============================================================================
 colores = importlib.import_module(ARCHIVO_COLORES)
 CARPETA_TABLAS = colores.CARPETA_TABLAS
-CARPETA_SALIDA = os.path.join(colores.CARPETA_BASE, "salidas", "clasicos")
+CARPETA_SALIDA = os.path.join(colores.CARPETA_BASE, "salidas_corregidas", "clasicos")
 
 # Nombres de las medidas, en el orden en que salen en pantalla y en el CSV.
 MEDIDAS = ["auc", "acc", "recall_m", "f1_m"]
@@ -128,11 +134,44 @@ def crear_clasificadores(semilla):
     ]
 
 
+# Pide un número por teclado y lo repite hasta que sea una opción del menú.
+def pedir_numero(cantidad):
+    while True:
+        respuesta = input("Entrada por teclado: ").strip()
+        if respuesta.isdigit() and 1 <= int(respuesta) <= cantidad:
+            return int(respuesta)
+        print(f"Opción no válida. Escriba un número entre 1 y {cantidad}.")
+
+
+# Pregunta con qué tabla se entrena y devuelve dos textos: el final del nombre
+# de la tabla de 03_metricas.py y la marca para los archivos de salida. En
+# "Otra" se escribe el final del nombre de la tabla (ejemplo: "RandomForest"
+# busca <tabla>_<dataset>_RandomForest.csv) y ese mismo texto es la marca.
+def elegir_tabla():
+    print("")
+    print("TABLA CON LA QUE SE ENTRENA")
+    numero_linea = 0
+    for texto, final_nombre, marca in TABLAS_MENU:
+        numero_linea += 1
+        print(f"    {numero_linea}. {texto}")
+    numero_otra = len(TABLAS_MENU) + 1
+    print(f"    {numero_otra}. Otra")
+    numero = pedir_numero(numero_otra)
+    if numero < numero_otra:
+        return TABLAS_MENU[numero - 1][1], TABLAS_MENU[numero - 1][2]
+    while True:
+        texto = input("Escriba el final del nombre de la tabla (ejemplo: RandomForest): ").strip()
+        if re.fullmatch(r"[A-Za-z0-9-]+", texto):
+            return texto, texto
+        print("Escriba solo letras, números o guiones, sin espacios.")
+
+
 # Devuelve el nombre de la ejecución más reciente de 03_metricas.py que tenga
-# la tabla pedida. Las tablas se llaman <tabla>_<dataset>_<método>.csv y el
-# nombre que se devuelve es la parte <dataset>_<método>.
-def buscar_ejecucion_reciente(tipo_tabla):
-    archivos_tabla = glob.glob(os.path.join(CARPETA_TABLAS, f"{tipo_tabla}_*.csv"))
+# la tabla pedida con el final de nombre elegido. Las tablas se llaman
+# <tabla>_<dataset>_<final>.csv y el nombre que se devuelve es la parte
+# <dataset>_<final>. Si no hay ninguna, devuelve vacío.
+def buscar_ejecucion_reciente(tipo_tabla, final_nombre):
+    archivos_tabla = glob.glob(os.path.join(CARPETA_TABLAS, f"{tipo_tabla}_*_{final_nombre}.csv"))
     if len(archivos_tabla) == 0:
         return ""
     archivo_reciente = max(archivos_tabla, key=os.path.getmtime)
@@ -211,22 +250,22 @@ def texto_medidas(medidas):
 #   3.3 Se entrena y se evalúa cada clasificador.
 #   3.4 Se guarda la tabla de resultados.
 # ==============================================================================
+final_tabla, marca_tabla = elegir_tabla()
 os.makedirs(CARPETA_SALIDA, exist_ok=True)
 tablas_entrenadas = 0
 for tipo_tabla in TABLAS:
 
     # --------------------------------------------------------------------------
     # 3.1 TABLA, SPLIT Y SEMILLA
-    # Si no se fijó una ejecución en el BLOQUE 0, se toma la más reciente.
+    # Se toma la tabla más reciente con el final de nombre elegido en el menú.
     # El split se llama Split_<dataset>_<división>_semilla<n>.csv: de ahí
     # salen la división y la semilla.
     # --------------------------------------------------------------------------
-    nombre_ejecucion = NOMBRE_EJECUCION
+    nombre_ejecucion = buscar_ejecucion_reciente(tipo_tabla, final_tabla)
     if nombre_ejecucion == "":
-        nombre_ejecucion = buscar_ejecucion_reciente(tipo_tabla)
-    ruta_tabla = os.path.join(CARPETA_TABLAS, f"{tipo_tabla}_{nombre_ejecucion}.csv")
-    if not os.path.exists(ruta_tabla):
         continue
+    nombre_dataset = nombre_ejecucion.rsplit("_", 1)[0]
+    ruta_tabla = os.path.join(CARPETA_TABLAS, f"{tipo_tabla}_{nombre_ejecucion}.csv")
     tabla = pd.read_csv(ruta_tabla)
     ruta_split = buscar_split(nombre_ejecucion)
     split = pd.read_csv(ruta_split)
@@ -252,7 +291,7 @@ for tipo_tabla in TABLAS:
     X_test = X[es_test]
     y_test = y[es_test]
     especies = sorted(y.unique())
-    RUTA_RESULTADOS = os.path.join(CARPETA_SALIDA, f"Clasicos_{tipo_tabla}_{nombre_ejecucion}_{texto_split[1]}_{texto_split[2]}.csv")
+    RUTA_RESULTADOS = os.path.join(CARPETA_SALIDA, f"Clasicos_{tipo_tabla}_{nombre_dataset}_{marca_tabla}_{texto_split[1]}_{texto_split[2]}.csv")
     print("=" * 70)
     print(f"Tabla: {tipo_tabla} | Ejecución: {nombre_ejecucion} | Split: {os.path.basename(ruta_split)}")
     print(f"Características: {X.shape[1]} | Clases: {len(especies)} | Train: {len(X_train)} | Test: {len(X_test)} | Semilla: {semilla}")
@@ -300,4 +339,4 @@ for tipo_tabla in TABLAS:
     tablas_entrenadas += 1
 
 if tablas_entrenadas == 0:
-    raise SystemExit("No hay ninguna tabla de 03_metricas.py. Ejecute primero ese código.")
+    raise SystemExit(f"No hay ninguna tabla de 03_metricas.py que termine en _{final_tabla}. Ejecute primero ese código.")
