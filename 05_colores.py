@@ -48,9 +48,9 @@ import matplotlib.pyplot as plt
 
 # Carpeta principal del proyecto: todas las demás rutas salen de esta.
 CARPETA_BASE = r"C:\Users\manue\Downloads\3ccbe"
-CARPETA_PLANTILLA = os.path.join(CARPETA_BASE, "salidas", "plantilla")
-CARPETA_TABLAS = os.path.join(CARPETA_BASE, "salidas", "importancias")
-CARPETA_SALIDA = os.path.join(CARPETA_BASE, "salidas", "colores")
+CARPETA_PLANTILLA = os.path.join(CARPETA_BASE, "salidas_corregidas", "plantilla")
+CARPETA_TABLAS = os.path.join(CARPETA_BASE, "salidas_corregidas", "importancias")
+CARPETA_SALIDA = os.path.join(CARPETA_BASE, "salidas_corregidas", "colores")
 
 # Plantilla que se va a leer. Si se deja vacío, el código toma sola la más
 # reciente. Para fijar una se escribe el dataset, el método y el tamaño,
@@ -120,6 +120,10 @@ def pintar_imagenes(tabla, plantilla, tamano):
     imagenes = np.ones((len(tabla), tamano, tamano), dtype=np.float32)
     for bloque in plantilla.itertuples(index=False, name=None):
         valores = tabla.iloc[:, N_COLUMNAS_META + bloque[POS_TABLA]].to_numpy(dtype=float)
+        # Los valores de la tabla NO se recortan: la normalización MinMax se ajusta
+        # solo con entrenamiento (CÓDIGO 3), así que los audios de prueba pueden
+        # tener valores fuera de [0,1]. El recorte a [0,1] se hace únicamente aquí,
+        # al calcular el gris con el que se pinta el bloque.
         grises = np.clip(1.0 - valores, 0.0, 1.0)
         imagenes[:, bloque[POS_FILA_INICIO]:bloque[POS_FILA_FIN], bloque[POS_COL_INICIO]:bloque[POS_COL_FIN]] = grises[:, None, None]
     return imagenes
