@@ -1,5 +1,5 @@
 # ==============================================================================
-# CÓDIGO 2 — EXTRACCIÓN DE CARACTERÍSTICAS + NORMALIZACIÓN
+# CÓDIGO 2 — EXTRACCIÓN DE CARACTERÍSTICAS (VALORES CRUDOS)
 # ==============================================================================
 # Este código es la extracción de características. Es el segundo que se utiliza:
 # recibe el CSV que entregó el filtrado (CÓDIGO 1), abre cada audio y le calcula
@@ -23,20 +23,19 @@
 #   3. Valida que cada especie tenga una sola etiqueta.
 #   4. Quita las especies que tienen menos audios que el mínimo elegido.
 #   5. Extrae las 9 características de cada audio.
-#   6. Normaliza las características con MinMaxScaler al rango [0,1].
-#   7. Valida la normalización.
-#   8. Guarda el único CSV final normalizado.
-#   9. Guarda un reporte con lo que pasó en cada paso.
+#   6. Valida que los valores crudos no tengan NaN ni infinitos.
+#   7. Guarda el único CSV final con los valores CRUDOS (sin normalizar).
+#   8. Guarda un reporte con lo que pasó en cada paso.
 #
 # IMPORTANTE:
 # - La etiqueta (label) ya viene creada desde el CÓDIGO 1 y aquí se conserva.
 #   No se vuelve a codificar.
-# - No se genera ni se guarda un archivo CSV bruto. Los valores originales se
-#   conservan únicamente en memoria para calcular estadísticas y documentarlos
-#   en el reporte.
-# - Las especies que no llegan al mínimo se quitan ANTES de extraer: así la
-#   normalización se hace una sola vez y solo con los audios con los que se
-#   trabaja.
+# - Este código YA NO normaliza. El CSV que guarda contiene los valores crudos
+#   de cada característica. La normalización MinMax se hace en el CÓDIGO 3
+#   (03_metricas.py), después del split y ajustada SOLO con los audios de
+#   entrenamiento, para que los audios de prueba no participen en ella.
+# - Las especies que no llegan al mínimo se quitan ANTES de extraer: así solo se
+#   trabaja con los audios que se van a usar.
 # - El archivo del filtrado se lee solo y sus columnas se leen por POSICIÓN,
 #   nunca por nombre.
 #
@@ -50,7 +49,6 @@ import glob
 import numpy as np
 import pandas as pd
 import librosa
-from sklearn.preprocessing import MinMaxScaler
 
 # ==============================================================================
 # BLOQUE 0 — RUTAS, POSICIONES Y PARÁMETROS
@@ -61,7 +59,7 @@ from sklearn.preprocessing import MinMaxScaler
 CARPETA_BASE = r"C:\Users\manue\Downloads\3ccbe"
 CARPETA_AUDIOS = os.path.join(CARPETA_BASE, "train_audio")
 CARPETA_ENTRADA = os.path.join(CARPETA_BASE, "salidas", "filtrado")
-CARPETA_SALIDA = os.path.join(CARPETA_BASE, "salidas", "caracteristicas")
+CARPETA_SALIDA = os.path.join(CARPETA_BASE, "salidas_corregidas", "caracteristicas")
 
 # Archivo del filtrado que se va a leer. Si se deja vacío, el código toma solo
 # el archivo más reciente que entregó el filtrado.
@@ -189,14 +187,14 @@ if not os.path.exists(RUTA_CSV):
     raise SystemExit(f"No se encontró el archivo de entrada: {RUTA_CSV}")
 nombre_archivo = os.path.splitext(os.path.basename(RUTA_CSV))[0]
 NOMBRE_DATASET = nombre_archivo.replace("Filtrado_", "", 1)
-SALIDA_NORMALIZADO = os.path.join(CARPETA_SALIDA, f"Caracteristicas_{NOMBRE_DATASET}.csv")
+SALIDA_CRUDO = os.path.join(CARPETA_SALIDA, f"Caracteristicas_{NOMBRE_DATASET}.csv")
 SALIDA_REPORTE = os.path.join(CARPETA_SALIDA, f"Reporte_Caracteristicas_{NOMBRE_DATASET}.txt")
 os.makedirs(CARPETA_SALIDA, exist_ok=True)
 df = pd.read_csv(RUTA_CSV)
 if len(df) == 0:
     raise SystemExit("El CSV del filtrado está vacío.")
 anotar("=" * 80)
-anotar("REPORTE DE EXTRACCIÓN Y NORMALIZACIÓN DE CARACTERÍSTICAS")
+anotar("REPORTE DE EXTRACCIÓN DE CARACTERÍSTICAS (VALORES CRUDOS)")
 anotar("=" * 80)
 anotar("1. CONFIGURACIÓN")
 anotar(f"Archivo de entrada     : {RUTA_CSV}")
@@ -230,9 +228,8 @@ anotar("Relación especie-label : correcta")
 # ==============================================================================
 # BLOQUE 2.1 — MÍNIMO DE AUDIOS POR ESPECIE
 # Se cuentan los audios de cada especie y se dejan solo las especies que llegan
-# al mínimo elegido. Se hace ANTES de extraer: así la normalización se calcula
-# una sola vez y solo con los audios con los que se trabaja. El orden de las
-# filas del filtrado no cambia.
+# al mínimo elegido. Se hace ANTES de extraer: así solo se extraen los audios con
+# los que se trabaja. El orden de las filas del filtrado no cambia.
 # ==============================================================================
 audios_por_especie = especie.value_counts()
 especies_conservadas = set(audios_por_especie[audios_por_especie >= minimo].index)
@@ -284,7 +281,7 @@ if len(filas_caracteristicas) == 0:
 # BLOQUE 4 — CONSTRUCCIÓN DE LAS TABLAS EN MEMORIA
 # La tabla meta conserva los nombres de columna que traía el CSV del filtrado.
 # La tabla bruta tiene una columna por característica, con los valores
-# originales. Solo vive en memoria: no se guarda en disco.
+# originales (crudos). Es la que se guarda en disco, sin normalizar.
 # ==============================================================================
 nombres_meta = [df.columns[POS_ARCHIVO], df.columns[POS_ESPECIE], df.columns[POS_LABEL], df.columns[POS_CLASE]]
 df_meta = pd.DataFrame(filas_meta, columns=nombres_meta)
@@ -301,67 +298,49 @@ for caracteristica in df_bruto.columns:
     numero_caracteristica += 1
 
 # ==============================================================================
-# BLOQUE 5 — NORMALIZACIÓN MIN-MAX
-# Se aplica MinMaxScaler únicamente a las características acústicas. Cada
-# característica queda escalada al rango [0,1], manteniendo intactas las cuatro
-# columnas meta. Esta normalización es la que posteriormente controla la
-# intensidad de gris de cada bloque en la representación visual.
+# BLOQUE 5 — VALIDACIÓN DE LOS VALORES CRUDOS
+# Aquí ya no se normaliza: la normalización MinMax se hace en el CÓDIGO 3, con
+# los audios de entrenamiento. Solo se verifica que no existan NaN, que no
+# existan infinitos y que el número de registros coincida con la tabla meta. Si
+# algo falla, el código se detiene.
 # ==============================================================================
-scaler = MinMaxScaler()
-valores_normalizados = scaler.fit_transform(df_bruto)
-df_norm = pd.DataFrame(valores_normalizados, columns=df_bruto.columns)
-
-# ==============================================================================
-# BLOQUE 6 — VALIDACIÓN DE LA NORMALIZACIÓN
-# Se verifica automáticamente que no existan NaN, que no existan infinitos, que
-# todas las características estén dentro de [0,1] y que el número de registros
-# no cambie. Si algo falla, el código se detiene.
-# ==============================================================================
-nan_total = int(np.isnan(valores_normalizados).sum())
-inf_total = int(np.isinf(valores_normalizados).sum())
-fuera_rango = int(((valores_normalizados < 0) | (valores_normalizados > 1)).sum())
+valores_brutos = df_bruto.to_numpy(dtype=float)
+nan_total = int(np.isnan(valores_brutos).sum())
+inf_total = int(np.isinf(valores_brutos).sum())
 if nan_total != 0:
-    raise SystemExit(f"Se encontraron {nan_total} valores NaN después de normalizar.")
+    raise SystemExit(f"Se encontraron {nan_total} valores NaN en las características.")
 if inf_total != 0:
-    raise SystemExit(f"Se encontraron {inf_total} valores infinitos después de normalizar.")
-if fuera_rango != 0:
-    raise SystemExit("Existen características fuera del rango [0,1].")
-if len(df_norm) != len(df_meta):
-    raise SystemExit("El número de registros cambió durante la normalización.")
+    raise SystemExit(f"Se encontraron {inf_total} valores infinitos en las características.")
+if len(df_bruto) != len(df_meta):
+    raise SystemExit("El número de registros de las características no coincide con el de la tabla meta.")
 
 # ==============================================================================
-# BLOQUE 7 — GUARDADO DEL ÚNICO CSV FINAL NORMALIZADO
-# Se unen las 4 columnas meta con las características normalizadas. Este es el
-# único archivo de características que se guarda en disco.
+# BLOQUE 6 — GUARDADO DEL ÚNICO CSV FINAL CON VALORES CRUDOS
+# Se unen las 4 columnas meta con las características crudas. Este es el único
+# archivo de características que se guarda en disco. Los valores NO están
+# normalizados: el CÓDIGO 3 los normaliza con los parámetros de entrenamiento.
 # ==============================================================================
-df_final = pd.concat([df_meta, df_norm], axis=1)
-df_final.to_csv(SALIDA_NORMALIZADO, index=False)
+df_final = pd.concat([df_meta, df_bruto], axis=1)
+df_final.to_csv(SALIDA_CRUDO, index=False)
 
 # ==============================================================================
-# BLOQUE 8 — REPORTE
-# Se calculan estadísticas de los valores brutos y normalizados para documentar
-# el proceso, se listan los audios con error y se guarda todo lo anotado.
+# BLOQUE 7 — REPORTE
+# Se calculan estadísticas de los valores crudos para documentar el proceso, se
+# listan los audios con error y se guarda todo lo anotado.
 # En el CSV final la especie está en la posición 1 y el label en la 2.
 # ==============================================================================
 estadisticas_brutas = df_bruto.agg(["min", "max", "mean", "std"]).T
-estadisticas_normalizadas = df_norm.agg(["min", "max", "mean", "std"]).T
 anotar("")
-anotar("4. ESTADÍSTICAS DE CARACTERÍSTICAS BRUTAS")
+anotar("4. ESTADÍSTICAS DE CARACTERÍSTICAS CRUDAS")
 for caracteristica, fila_est in estadisticas_brutas.iterrows():
     anotar(f"{caracteristica:<20} min={fila_est.iloc[0]:.10f} max={fila_est.iloc[1]:.10f} media={fila_est.iloc[2]:.10f} std={fila_est.iloc[3]:.10f}")
 anotar("")
-anotar("5. NORMALIZACIÓN")
-anotar("Método                 : MinMaxScaler")
-anotar("Rango objetivo         : [0,1]")
-anotar(f"NaN finales            : {nan_total}")
+anotar("5. VALIDACIÓN DE LOS VALORES CRUDOS")
+anotar("Normalización         : NO SE HACE AQUÍ; se hace en el CÓDIGO 3 (03_metricas.py), ajustada solo con train")
+anotar(f"NaN                    : {nan_total}")
 anotar(f"Infinitos              : {inf_total}")
-anotar(f"Fuera de rango         : {fuera_rango}")
 anotar("")
-anotar("6. ESTADÍSTICAS DE CARACTERÍSTICAS NORMALIZADAS")
-for caracteristica, fila_est in estadisticas_normalizadas.iterrows():
-    anotar(f"{caracteristica:<20} min={fila_est.iloc[0]:.10f} max={fila_est.iloc[1]:.10f} media={fila_est.iloc[2]:.10f} std={fila_est.iloc[3]:.10f}")
-anotar("")
-anotar("7. DATASET FINAL")
+anotar("6. DATASET FINAL")
 anotar(f"Registros              : {len(df_final):,}")
 anotar(f"Especies               : {df_final.iloc[:, 1].nunique():,}")
 anotar(f"Labels                 : {df_final.iloc[:, 2].nunique():,}")
@@ -369,15 +348,14 @@ anotar(f"Columnas meta          : {N_COLUMNAS_META}")
 anotar(f"Columnas totales       : {df_final.shape[1]}")
 anotar("Orden                  : archivo | especie | label | clase | características...")
 anotar("")
-anotar("8. AUDIOS CON ERROR")
+anotar("7. AUDIOS CON ERROR")
 if len(errores) == 0:
     anotar("No se registraron errores.")
 for archivo_error, texto_error in errores:
     anotar(f"{archivo_error} | {texto_error}")
 anotar("")
-anotar("9. ARCHIVOS GENERADOS")
-anotar("CSV bruto              : NO SE GUARDA; se usa únicamente en memoria para estadísticas")
-anotar(f"CSV normalizado        : {SALIDA_NORMALIZADO}")
+anotar("8. ARCHIVOS GENERADOS")
+anotar(f"CSV con valores crudos : {SALIDA_CRUDO}")
 anotar(f"Reporte                : {SALIDA_REPORTE}")
 with open(SALIDA_REPORTE, "w", encoding="utf-8") as archivo_reporte:
     archivo_reporte.write("\n".join(reporte))
