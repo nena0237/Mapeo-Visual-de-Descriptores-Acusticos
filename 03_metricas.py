@@ -1,29 +1,41 @@
 # ==============================================================================
 # CÓDIGO 3 — IMPORTANCIAS + SPLIT
 # ==============================================================================
-# Recibe las tablas normalizadas que entregó la extracción (CÓDIGO 2: caracteristicas y índices)
-# y hace lo mismo con cada una: la tabla de características y la de índices.
+# Recibe las tablas CRUDAS que entregó la extracción (CÓDIGO 2: caracteristicas y
+# índices, sin normalizar) y hace lo mismo con cada una: la tabla de
+# características y la de índices.
 #
 # Qué hace, en orden:
 #   1. Pregunta por teclado el método de importancia, la división del split y
 #      la semilla. Con esas tres respuestas se ejecuta todo lo demás.
 #   2. Busca las tablas de la extracción.
-#   3. Calcula la importancia de cada característica con el método elegido.
-#   4. Normaliza las importancias y selecciona las características:
+#   3. Crea el split único estratificado, compartido por todas las líneas de
+#      clasificación, y lo guarda. El split se hace ANTES de normalizar y de
+#      calcular las importancias.
+#   4. Normaliza con MinMaxScaler al rango [0,1]. El escalador se ajusta (fit)
+#      SOLO con los audios de entrenamiento y se aplica (transform) a
+#      entrenamiento y a prueba.
+#   5. Calcula la importancia de cada característica con el método elegido,
+#      ajustado SOLO con los audios de entrenamiento ya normalizados.
+#   6. Normaliza las importancias y selecciona las características:
 #        - Se eliminan las características con importancia = 0.
 #        - Si el total no es múltiplo de 3, se eliminan las de menor importancia
 #          hasta llegar al múltiplo de 3 inmediatamente inferior.
 #        - Se renormalizan las importancias restantes para que sumen 1.
 #        - Se conserva el orden original y se crea un índice consecutivo nuevo.
-#   5. Guarda la tabla de importancias y la tabla normalizada con solo las
-#      características seleccionadas.
-#   6. Crea el split único estratificado, compartido por todas las líneas de
-#      clasificación, y lo guarda.
-#   7. Guarda un reporte con lo que pasó en cada paso.
+#   7. Guarda la tabla de importancias y la tabla normalizada (entrenamiento y
+#      prueba, con los parámetros de entrenamiento) con solo las características
+#      seleccionadas. También guarda la tabla normalizada COMPLETA, con todas
+#      las características y sin selección (nombre terminado en _SinSeleccion),
+#      para la línea clásica sin ReliefF.
+#   8. Guarda un reporte con lo que pasó en cada paso.
 #
 # IMPORTANTE:
-# - La importancia se calcula con todos los audios de la extracción y después
-#   se hace el split.
+# - Los audios de prueba NO participan ni en la normalización ni en el cálculo
+#   de las importancias: ambos se ajustan solo con entrenamiento. Por eso, en
+#   prueba algunos valores pueden quedar fuera de [0,1]. No se recortan en la
+#   tabla; el reporte cuenta cuántos hay por característica. El recorte a [0,1]
+#   solo se hace al pintar la imagen (05_colores.py).
 # - El múltiplo de 3 es necesario porque la plantilla agrupa las
 #   características en filas de 3 bloques.
 # - Las importancias se guardan en el mismo orden de las columnas de la tabla,
@@ -44,6 +56,7 @@ from sklearn.ensemble import ExtraTreesClassifier
 from sklearn.feature_selection import mutual_info_classif
 from sklearn.feature_selection import f_classif
 from sklearn.model_selection import train_test_split
+from sklearn.preprocessing import MinMaxScaler
 
 # ==============================================================================
 # BLOQUE 0 — RUTAS, POSICIONES Y PARÁMETROS
@@ -52,9 +65,9 @@ from sklearn.model_selection import train_test_split
 
 # Carpeta principal del proyecto: todas las demás rutas salen de esta.
 CARPETA_BASE = r"C:\Users\manue\Downloads\3ccbe"
-CARPETA_CARACTERISTICAS = os.path.join(CARPETA_BASE, "salidas", "caracteristicas")
-CARPETA_INDICES = os.path.join(CARPETA_BASE, "salidas", "indices")
-CARPETA_SALIDA = os.path.join(CARPETA_BASE, "salidas", "importancias")
+CARPETA_CARACTERISTICAS = os.path.join(CARPETA_BASE, "salidas_corregidas", "caracteristicas")
+CARPETA_INDICES = os.path.join(CARPETA_BASE, "salidas_corregidas", "indices")
+CARPETA_SALIDA = os.path.join(CARPETA_BASE, "salidas_corregidas", "importancias")
 
 # Dataset que se va a leer. Si se deja vacío, el código toma solo el más
 # reciente que entregó la extracción. Para fijar uno se escribe su nombre,
@@ -66,12 +79,14 @@ POS_ARCHIVO = 0       # ruta del audio dentro de la carpeta de audios
 POS_ESPECIE = 1       # nombre científico de la especie
 POS_LABEL = 2         # etiqueta numérica de la especie
 N_COLUMNAS_META = 4   # las características empiezan después de estas columnas
+POS_SET = 3           # conjunto del audio en el split: "train" o "test"
 
 # Parámetros de la importancia.
 N_NEIGHBORS = 100       # vecinos de ReliefF
 MULTIPLO_OBJETIVO = 3   # la plantilla usa filas de 3 bloques
 N_ARBOLES = 500         # árboles de Random Forest y Extra Trees
 SEMILLA_METODOS = 42    # semilla de los métodos que tienen azar (no es la del split)
+TOL_NORMALIZACION = 1e-9   # tolerancia para los errores de precisión de la normalización
 
 # Opciones de los menús. El texto es lo que se muestra y el valor lo que se usa.
 SPLITS_MENU = [("60/40", (60, 40)), ("70/30 (recomendado)", (70, 30)), ("80/20", (80, 20))]
@@ -90,7 +105,15 @@ SEMILLAS_MENU = [("1024 (recomendada)", 1024), ("42", 42)]
 # es importante si separa a los audios vecinos que son de especies distintas.
 def importancia_relieff(X, y):
     vecinos = min(N_NEIGHBORS, len(X) - 1)
-    relieff = ReliefF(n_neighbors=vecinos)
+    # skrebate cuenta los valores únicos de y: si son MÁS que discrete_threshold
+    # (10 por defecto), trata la etiqueta como continua y "misma clase" pasa a
+    # significar "código numérico cercano". Con discrete_threshold igual al
+    # número de especies, la etiqueta se trata siempre como categorías. Ese
+    # mismo umbral también se aplica a las características (una columna con
+    # menos valores únicos que el umbral se trataría como discreta); se revisó
+    # que ninguna columna de características ni de índices lo cumple.
+    especies = np.unique(y)
+    relieff = ReliefF(n_neighbors=vecinos, discrete_threshold=len(especies))
     relieff.fit(X, y)
     return relieff.feature_importances_
 
@@ -297,75 +320,28 @@ anotar(f"División del split     : {porcentaje_train:g}% entrenamiento / {porcen
 anotar(f"Semilla                : {semilla}")
 
 # ==============================================================================
-# BLOQUE 3 — IMPORTANCIA Y SELECCIÓN DE CARACTERÍSTICAS
-# Se repite lo mismo para cada tabla de la extracción:
-#   - Se lee la tabla.
-#   - X son las columnas de características (desde la posición N_COLUMNAS_META).
-#   - y es la especie de cada audio. Las especies se numeran de 0 a N-1 en orden
-#     alfabético, para que el resultado no dependa de los números que traiga la
-#     columna label.
-#   - Se calcula la importancia con el método elegido.
-#   - Se seleccionan las características con la función de selección.
-#   - Se guarda la tabla de importancias y la tabla normalizada que conserva las
-#     columnas meta y solo las características seleccionadas.
-# ==============================================================================
-audios_por_tabla = []
-tabla_base = None
-numero_seccion = 1
-for tipo_tabla, ruta_tabla in tablas:
-    numero_seccion += 1
-    df = pd.read_csv(ruta_tabla)
-    nombres = list(df.columns[N_COLUMNAS_META:])
-    X = df.iloc[:, N_COLUMNAS_META:].to_numpy(dtype=float)
-    y, especies = pd.factorize(df.iloc[:, POS_ESPECIE], sort=True)
-    print("")
-    print(f"Calculando importancia de {tipo_tabla} con {nombre_metodo}...")
-    importancias = funcion_metodo(X, y)
-    seleccionadas, eliminadas_cero, eliminadas_ajuste = seleccionar_caracteristicas(nombres, importancias)
-    if len(seleccionadas) == 0:
-        raise SystemExit(f"No quedó ninguna característica seleccionada en la tabla de {tipo_tabla}.")
-    posiciones_seleccionadas = seleccionadas.iloc[:, 0].tolist()
-    seleccionadas.iloc[:, 0] = range(len(seleccionadas))
-    columnas_finales = list(range(N_COLUMNAS_META)) + [N_COLUMNAS_META + posicion for posicion in posiciones_seleccionadas]
-    df_seleccion = df.iloc[:, columnas_finales]
-    RUTA_IMPORTANCIA = os.path.join(CARPETA_SALIDA, f"Importancia_{tipo_tabla}_{NOMBRE_DATASET}_{nombre_metodo}.csv")
-    RUTA_TABLA = os.path.join(CARPETA_SALIDA, f"{tipo_tabla}_{NOMBRE_DATASET}_{nombre_metodo}.csv")
-    seleccionadas.to_csv(RUTA_IMPORTANCIA, index=False)
-    df_seleccion.to_csv(RUTA_TABLA, index=False)
-    audios_por_tabla.append(set(df.iloc[:, POS_ARCHIVO]))
-    if tabla_base is None:
-        tabla_base = df.iloc[:, [POS_ARCHIVO, POS_ESPECIE, POS_LABEL]].copy()
-    anotar("")
-    anotar(f"{numero_seccion}. IMPORTANCIA DE {tipo_tabla.upper()}")
-    anotar(f"Tabla de entrada                  : {ruta_tabla}")
-    anotar(f"Audios                            : {len(df):,}")
-    anotar(f"Especies                          : {len(especies):,}")
-    anotar(f"Características originales        : {len(nombres)}")
-    anotar(f"Eliminadas por importancia = 0    : {len(eliminadas_cero)}")
-    for fila in eliminadas_cero.itertuples(index=False, name=None):
-        anotar(f"  - {fila[1]}: {fila[2]:.12f}")
-    anotar(f"Eliminadas para múltiplo de {MULTIPLO_OBJETIVO}     : {len(eliminadas_ajuste)}")
-    for fila in eliminadas_ajuste.sort_values(eliminadas_ajuste.columns[2]).itertuples(index=False, name=None):
-        anotar(f"  - {fila[1]}: {fila[2]:.12f}")
-    anotar(f"Características finales           : {len(seleccionadas)}")
-    anotar(f"Suma de importancias finales      : {seleccionadas.iloc[:, 2].sum():.12f}")
-    anotar(f"Tabla de importancias             : {RUTA_IMPORTANCIA}")
-    anotar(f"Tabla normalizada seleccionada    : {RUTA_TABLA}")
-    reporte.append("Importancia final de cada característica:")
-    for fila in seleccionadas.itertuples(index=False, name=None):
-        reporte.append(f"  [{fila[0]}] {fila[1]:<22} {fila[2]:.12f}")
-
-# ==============================================================================
-# BLOQUE 4 — SPLIT ÚNICO ESTRATIFICADO
+# BLOQUE 3 — SPLIT ÚNICO ESTRATIFICADO
 # Crea el split único que comparten todas las líneas de clasificación, para que
-# se entrenen y se evalúen exactamente con los mismos audios.
-# Estratificado significa que cada especie queda repartida en la misma
-# proporción entre entrenamiento y prueba.
+# se entrenen y se evalúen exactamente con los mismos audios. Se hace ANTES de
+# normalizar y de calcular las importancias, para que los audios de prueba no
+# participen en ninguno de los dos pasos.
+# Primero se leen las tablas crudas de la extracción. Estratificado significa
+# que cada especie queda repartida en la misma proporción entre entrenamiento y
+# prueba.
 # Solo entran los audios que están en todas las tablas: si un audio falló en
 # una de las extracciones, se quita del split.
 # Cada especie necesita al menos 2 audios, uno para cada conjunto. Si no se
 # puede hacer el split, el código se detiene y dice por qué.
 # ==============================================================================
+tablas_leidas = []
+audios_por_tabla = []
+tabla_base = None
+for tipo_tabla, ruta_tabla in tablas:
+    df = pd.read_csv(ruta_tabla)
+    tablas_leidas.append((tipo_tabla, ruta_tabla, df))
+    audios_por_tabla.append(set(df.iloc[:, POS_ARCHIVO]))
+    if tabla_base is None:
+        tabla_base = df.iloc[:, [POS_ARCHIVO, POS_ESPECIE, POS_LABEL]].copy()
 audios_comunes = set.intersection(*audios_por_tabla)
 split = tabla_base[tabla_base.iloc[:, 0].isin(audios_comunes)].reset_index(drop=True)
 posiciones = np.arange(len(split))
@@ -377,7 +353,8 @@ split["set"] = "train"
 split.iloc[posiciones_test, 3] = "test"
 split.to_csv(RUTA_SPLIT, index=False)
 es_test = split.iloc[:, 3] == "test"
-numero_seccion += 1
+conjunto_por_audio = dict(zip(split.iloc[:, POS_ARCHIVO], split.iloc[:, POS_SET]))
+numero_seccion = 2
 anotar("")
 anotar(f"{numero_seccion}. SPLIT")
 anotar(f"Audios en todas las tablas : {len(split):,}")
@@ -388,6 +365,114 @@ anotar(f"Especies en prueba         : {split[es_test].iloc[:, 1].nunique():,}")
 anotar("Columnas del split         : archivo | especie | label | set")
 anotar(f"Split generado             : {RUTA_SPLIT}")
 anotar(f"Reporte generado           : {RUTA_REPORTE}")
+
+# ==============================================================================
+# BLOQUE 4 — NORMALIZACIÓN, IMPORTANCIA Y SELECCIÓN DE CARACTERÍSTICAS
+# Se repite lo mismo para cada tabla de la extracción (ya leída en el BLOQUE 3):
+#   - Se dejan solo los audios que están en el split.
+#   - X_bruto son las columnas de características crudas (desde la posición
+#     N_COLUMNAS_META).
+#   - y es la especie de cada audio. Las especies se numeran de 0 a N-1 en orden
+#     alfabético, para que el resultado no dependa de los números que traiga la
+#     columna label.
+#   - Se normaliza con MinMaxScaler: el escalador se ajusta SOLO con las filas
+#     de entrenamiento y se aplica a todas. En entrenamiento los valores deben
+#     quedar en [0,1] (solo se corrige el error de precisión dentro de la
+#     tolerancia; si no, el código se detiene). En prueba no se recorta nada: se
+#     cuentan los valores que quedaron por fuera de [0,1], por característica.
+#   - Se calcula la importancia con el método elegido, usando SOLO las filas de
+#     entrenamiento ya normalizadas.
+#   - Se seleccionan las características con la función de selección.
+#   - Se guarda la tabla de importancias y la tabla normalizada (entrenamiento y
+#     prueba) que conserva las columnas meta y solo las características
+#     seleccionadas.
+#   - Se guarda además la tabla normalizada completa (todas las características,
+#     sin selección), con el mismo escalador ajustado solo con entrenamiento.
+# ==============================================================================
+for tipo_tabla, ruta_tabla, df in tablas_leidas:
+    numero_seccion += 1
+    df = df[df.iloc[:, POS_ARCHIVO].isin(audios_comunes)].reset_index(drop=True)
+    nombres = list(df.columns[N_COLUMNAS_META:])
+    X_bruto = df.iloc[:, N_COLUMNAS_META:].to_numpy(dtype=float)
+    y, especies = pd.factorize(df.iloc[:, POS_ESPECIE], sort=True)
+    conjuntos = df.iloc[:, POS_ARCHIVO].map(conjunto_por_audio)
+    filas_train = (conjuntos == "train").to_numpy()
+    filas_test = (conjuntos == "test").to_numpy()
+    if int(filas_train.sum()) + int(filas_test.sum()) != len(df):
+        raise SystemExit(f"Hay audios de la tabla {tipo_tabla} que no están en el split.")
+    if not np.isfinite(X_bruto).all():
+        raise SystemExit(f"La tabla de {tipo_tabla} tiene valores NaN o infinitos.")
+
+    # Normalización MinMax ajustada solo con entrenamiento.
+    escalador = MinMaxScaler()
+    escalador.fit(X_bruto[filas_train])
+    X = escalador.transform(X_bruto)
+    X_train = X[filas_train]
+    X_test = X[filas_test]
+    fuera_train = int(((X_train < -TOL_NORMALIZACION) | (X_train > 1 + TOL_NORMALIZACION)).sum())
+    if fuera_train != 0:
+        raise SystemExit(f"La normalización dejó {fuera_train} valores de entrenamiento fuera de [0,1] en la tabla de {tipo_tabla}.")
+    X[filas_train] = np.clip(X_train, 0.0, 1.0)
+    X_train = X[filas_train]
+    test_por_debajo = (X_test < -TOL_NORMALIZACION).sum(axis=0)
+    test_por_encima = (X_test > 1 + TOL_NORMALIZACION).sum(axis=0)
+
+    # Revisión del umbral de ReliefF: cuántas columnas de entrenamiento tienen
+    # tan pocos valores únicos que skrebate las trataría como discretas.
+    umbral_discreto = len(np.unique(y[filas_train]))
+    columnas_discretas = 0
+    for columna in range(X_train.shape[1]):
+        if len(np.unique(X_train[:, columna])) <= umbral_discreto:
+            columnas_discretas += 1
+
+    # Importancia con entrenamiento solamente y selección de características.
+    print("")
+    print(f"Calculando importancia de {tipo_tabla} con {nombre_metodo}...")
+    importancias = funcion_metodo(X_train, y[filas_train])
+    seleccionadas, eliminadas_cero, eliminadas_ajuste = seleccionar_caracteristicas(nombres, importancias)
+    if len(seleccionadas) == 0:
+        raise SystemExit(f"No quedó ninguna característica seleccionada en la tabla de {tipo_tabla}.")
+    posiciones_seleccionadas = seleccionadas.iloc[:, 0].tolist()
+    seleccionadas.iloc[:, 0] = range(len(seleccionadas))
+    columnas_finales = list(range(N_COLUMNAS_META)) + [N_COLUMNAS_META + posicion for posicion in posiciones_seleccionadas]
+    df_normalizada = pd.concat([df.iloc[:, 0:N_COLUMNAS_META], pd.DataFrame(X, columns=nombres)], axis=1)
+    df_seleccion = df_normalizada.iloc[:, columnas_finales]
+    RUTA_IMPORTANCIA = os.path.join(CARPETA_SALIDA, f"Importancia_{tipo_tabla}_{NOMBRE_DATASET}_{nombre_metodo}.csv")
+    RUTA_TABLA = os.path.join(CARPETA_SALIDA, f"{tipo_tabla}_{NOMBRE_DATASET}_{nombre_metodo}.csv")
+    seleccionadas.to_csv(RUTA_IMPORTANCIA, index=False)
+    df_seleccion.to_csv(RUTA_TABLA, index=False)
+    RUTA_SIN_SELECCION = os.path.join(CARPETA_SALIDA, f"{tipo_tabla}_{NOMBRE_DATASET}_SinSeleccion.csv")
+    df_normalizada.to_csv(RUTA_SIN_SELECCION, index=False)
+    anotar("")
+    anotar(f"{numero_seccion}. IMPORTANCIA DE {tipo_tabla.upper()}")
+    anotar(f"Tabla de entrada                  : {ruta_tabla}")
+    anotar(f"Audios                            : {len(df):,}")
+    anotar(f"Audios de entrenamiento           : {int(filas_train.sum()):,}")
+    anotar(f"Audios de prueba                  : {int(filas_test.sum()):,}")
+    anotar(f"Especies                          : {len(especies):,}")
+    anotar("Normalización MinMax              : ajustada solo con entrenamiento")
+    anotar(f"{'Importancia (' + nombre_metodo + ')':<34}: calculada solo con entrenamiento")
+    anotar(f"Valores de prueba fuera de [0,1]  : {int(test_por_debajo.sum() + test_por_encima.sum()):,} de {X_test.size:,}")
+    for columna in range(len(nombres)):
+        if test_por_debajo[columna] + test_por_encima[columna] > 0:
+            anotar(f"  - {nombres[columna]}: {int(test_por_debajo[columna])} por debajo de 0, {int(test_por_encima[columna])} por encima de 1")
+    anotar(f"Umbral discreto de ReliefF         : {umbral_discreto}")
+    anotar(f"Columnas discretas (<= umbral)    : {columnas_discretas}")
+    anotar(f"Características originales        : {len(nombres)}")
+    anotar(f"Eliminadas por importancia = 0    : {len(eliminadas_cero)}")
+    for fila in eliminadas_cero.itertuples(index=False, name=None):
+        anotar(f"  - {fila[1]}: {fila[2]:.12f}")
+    anotar(f"Eliminadas para múltiplo de {MULTIPLO_OBJETIVO}     : {len(eliminadas_ajuste)}")
+    for fila in eliminadas_ajuste.sort_values(eliminadas_ajuste.columns[2]).itertuples(index=False, name=None):
+        anotar(f"  - {fila[1]}: {fila[2]:.12f}")
+    anotar(f"Características finales           : {len(seleccionadas)}")
+    anotar(f"Suma de importancias finales      : {seleccionadas.iloc[:, 2].sum():.12f}")
+    anotar(f"Tabla de importancias             : {RUTA_IMPORTANCIA}")
+    anotar(f"Tabla normalizada seleccionada    : {RUTA_TABLA}")
+    anotar(f"Tabla normalizada sin selección   : {RUTA_SIN_SELECCION}")
+    reporte.append("Importancia final de cada característica:")
+    for fila in seleccionadas.itertuples(index=False, name=None):
+        reporte.append(f"  [{fila[0]}] {fila[1]:<22} {fila[2]:.12f}")
 
 # ==============================================================================
 # BLOQUE 5 — REPORTE
